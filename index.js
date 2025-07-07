@@ -15,19 +15,19 @@ app.use(cors());
 app.use(bodyParser.json());
 
 const db = mysql.createConnection({
-  host: 'btuu8k041acvbxporpsx-mysql.services.clever-cloud.com',
-  user: 'uu2z9bfklpnksgne',
-  password: 'zdl6pa09XUKjNn5AIT55',
-  database: 'btuu8k041acvbxporpsx',
-  port: 3306
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+  port: process.env.DB_PORT || 3306
 });
 
-db.connect(err => {
-    if (err) {
-        console.error('Error de conexión a la base de datos:', err);
-    } else {
-        console.log('Conectado a la base de datos MySQL');
-    }
+db.connect((err) => {
+  if (err) {
+    console.error('❌ Error de conexión:', err.message);
+  } else {
+    console.log('✅ Conectado a la base de datos Clever Cloud');
+  }
 });
 // Ruta de prueba
 app.get('/', (req, res) => {
