@@ -38,6 +38,90 @@ app.listen(PORT, () => {
     console.log(`Servidor corriendo en http://localhost:${PORT}`);
 });
 
+// 3. Función auxiliar: generarTripletasUsuario
+function generarTripletasUsuario(idusuario, callback) {
+    const store = $rdf.graph();
+    const FOAF = $rdf.Namespace('http://xmlns.com/foaf/0.1/');
+    const EX = $rdf.Namespace('http://example.org/ontology#');
+
+    const dir = path.join(__dirname, 'ontologia', 'each_user');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+    const ttlPath = path.join(dir, `usuario_${idusuario}.ttl`);
+    const rdfPath = path.join(dir, `usuario_${idusuario}.rdf`);
+
+    // 1. Consultar usuario
+    const queryUsuario = `SELECT * FROM usuario WHERE id = ?`;
+    db.query(queryUsuario, [idusuario], (err, results) => {
+        if (err) return callback(err);
+        if (results.length === 0) return callback(new Error('Usuario no encontrado'));
+
+        const usuario = results[0];
+        const userURI = $rdf.sym(`http://example.org/usuario/${usuario.id}`);
+
+        store.add(userURI, FOAF('name'), $rdf.literal(usuario.UserName));
+        store.add(userURI, FOAF('mbox'), $rdf.literal(usuario.Correo));
+
+        // 2. Comentarios hechos por el usuario
+        const queryComentarios = `SELECT * FROM comentarios WHERE idusuario = ?`;
+        db.query(queryComentarios, [usuario.id], (err, comentarios) => {
+            if (err) return callback(err);
+
+            comentarios.forEach(comentario => {
+                const comentarioURI = $rdf.sym(`http://example.org/comentario/${comentario.idcomentarios}`);
+                store.add(userURI, EX('hizoComentario'), comentarioURI);
+                store.add(comentarioURI, EX('contenido'), $rdf.literal(comentario.contenido));
+            });
+
+            // 3. Likes a noticias
+            const queryLikesNoticias = `SELECT * FROM likes_noticias WHERE idusuarioLI = ?`;
+            db.query(queryLikesNoticias, [usuario.id], (err, likesNoticias) => {
+                if (err) return callback(err);
+
+                likesNoticias.forEach(like => {
+                    const noticiaURI = $rdf.sym(`http://example.org/noticia/${like.idnoticiaLI}`);
+                    store.add(userURI, EX('userDaLikeNoticia'), noticiaURI);
+                });
+
+                // 4. Historial de noticias vistas
+                const queryHistorialNoticias = `SELECT * FROM historialnoticias WHERE idusuarioHN = ?`;
+                db.query(queryHistorialNoticias, [usuario.id], (err, historial) => {
+                    if (err) return callback(err);
+
+                    historial.forEach(entry => {
+                        const noticiaURI = $rdf.sym(`http://example.org/noticia/${entry.idnoticiaHN}`);
+                        store.add(userURI, EX('haVistoNoticia'), noticiaURI);
+                    });
+
+                    // 5. Historial de comentarios vistos
+                    const queryHistorialComentarios = `SELECT * FROM historialcomentarios WHERE idusuarioHC = ?`;
+                    db.query(queryHistorialComentarios, [usuario.id], (err, historialComent) => {
+                        if (err) return callback(err);
+
+                        historialComent.forEach(entry => {
+                            const comentarioURI = $rdf.sym(`http://example.org/comentario/${entry.idcomentariosHC}`);
+                            store.add(userURI, EX('haVistoComentario'), comentarioURI);
+                        });
+
+                        // 6. Serializar y guardar RDF y TTL
+                        const ttl = new $rdf.Serializer(store).toN3(store);
+                        $rdf.serialize(null, store, "http://example.org/", "application/rdf+xml", (err, rdfXml) => {
+                            if (err) return callback(err);
+
+                            fs.writeFile(ttlPath, ttl, (err) => {
+                                if (err) return callback(err);
+                                fs.writeFile(rdfPath, rdfXml, (err) => {
+                                    if (err) return callback(err);
+                                    callback(null); // Éxito
+                                });
+                            });
+                        });
+                    });
+                });
+            });
+        });
+    });
+}
 app.get("/usuario", (req, res) => {
   const correo = req.query.correo;
 
@@ -431,7 +515,431 @@ app.get('/api/noticias/:id/LIKES', async (req, res) => {
     res.status(500).json({ error: 'Error interno del servidor' });
   }
 });
+//SECTION ONTOLOGIAS:
+app.get('/ontologia/general', (req, res) => {
+    const ttlPath = path.join(__dirname, 'ontologia', 'general.ttl');
+    fs.readFile(ttlPath, 'utf8', (err, data) => {
+        if (err) return res.status(500).json({ error: 'No se pudo cargar la ontología general' });
+        res.set('Content-Type', 'text/turtle');
+        res.send(data);
+    });
+});
+app.get('/ontologia/usuario', (req, res) => {
+    const ttlPath = path.join(__dirname, 'ontologia', 'usuario.ttl');
 
+    fs.readFile(ttlPath, 'utf8', (err, data) => {
+        if (err) {
+            console.error('Error al leer ontología:', err);
+            return res.status(500).json({ error: 'No se pudo cargar la ontología del usuario' });
+        }
+
+        // Cargar los datos en un grafo RDF usando rdflib
+        const store = $rdf.graph();
+        try {
+            $rdf.parse(data, store, 'http://example.org/ontology#', 'text/turtle');
+            res.set('Content-Type', 'text/turtle');
+            res.send(data);
+        } catch (parseErr) {
+            console.error('Error al parsear el RDF:', parseErr);
+            res.status(500).json({ error: 'Ontología mal formada' });
+        }
+    });
+});
+app.get('/ontologia/publicacion', (req, res) => {
+    const ttlPath = path.join(__dirname, 'ontologia', 'publicacion.ttl');
+
+    fs.readFile(ttlPath, 'utf8', (err, data) => {
+        if (err) {
+            console.error('Error al leer ontología:', err);
+            return res.status(500).json({ error: 'No se pudo cargar la ontología de publicación' });
+        }
+
+        // Cargar los datos en un grafo RDF usando rdflib
+        const store = $rdf.graph();
+        try {
+            $rdf.parse(data, store, 'http://example.org/ontology#', 'text/turtle');
+            res.set('Content-Type', 'text/turtle');
+            res.send(data);
+        } catch (parseErr) {
+            console.error('Error al parsear el RDF:', parseErr);
+            res.status(500).json({ error: 'Ontología mal formada' });
+        }
+    });
+});
+app.get('/ontologia/comentarios', (req, res) => {
+    const ttlPath = path.join(__dirname, 'ontologia', 'comentarios.ttl');
+
+    fs.readFile(ttlPath, 'utf8', (err, data) => {
+        if (err) return res.status(500).json({ error: 'No se pudo cargar la ontología de comentarios' });
+
+        const store = $rdf.graph();
+        try {
+            $rdf.parse(data, store, 'http://example.org/ontology#', 'text/turtle');
+            res.set('Content-Type', 'text/turtle');
+            res.send(data);
+        } catch {
+            res.status(500).json({ error: 'Ontología mal formada' });
+        }
+    });
+});
+app.get('/ontologia/historialcomentarios', (req, res) => {
+    const ttlPath = path.join(__dirname, 'ontologia', 'historialcomentarios.ttl');
+
+    fs.readFile(ttlPath, 'utf8', (err, data) => {
+        if (err) return res.status(500).json({ error: 'No se pudo cargar la ontología del historial de comentarios' });
+
+        const store = $rdf.graph();
+        try {
+            $rdf.parse(data, store, 'http://example.org/ontology#', 'text/turtle');
+            res.set('Content-Type', 'text/turtle');
+            res.send(data);
+        } catch {
+            res.status(500).json({ error: 'Ontología mal formada' });
+        }
+    });
+});
+// Ruta para generar tripletas RDF de instancias de usuarios
+app.get('/rdf/usuarios', (req, res) => {
+    const consulta = 'SELECT * FROM usuario';
+    db.query(consulta, (err, resultados) => {
+        if (err) {
+            console.error('Error al consultar usuarios:', err);
+            return res.status(500).send('Error al generar RDF');
+        }
+
+        let rdf = `@prefix : <http://example.org/ontology#> .\n`;
+        rdf += `@prefix user: <http://example.org/usuario#> .\n`;
+        rdf += `@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\n`;
+
+        resultados.forEach((usuario) => {
+            rdf += `user:usuario${usuario.idusuario} a :Usuario ;\n`;
+            rdf += `    :UserName "${usuario.UserName}" ;\n`;
+            rdf += `    :Correo "${usuario.Correo}" ;\n`;
+            rdf += `    :Contrasena "${usuario.Contrasena}" ;\n`;
+            rdf += `    :Dia "${usuario.Dia}"^^xsd:int ;\n`;
+            rdf += `    :Mes "${usuario.Mes}"^^xsd:int ;\n`;
+            rdf += `    :Anio "${usuario.Anio}"^^xsd:int .\n\n`;
+        });
+
+        const rutaTtl = path.join(__dirname, 'ontologia', 'instancias', 'usuarios.ttl');
+        const rutaXml = path.join(__dirname, 'ontologia', 'instancias', 'usuarios.rdf');
+
+        const dir = path.dirname(rutaTtl);
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+        }
+
+        // Guardar el archivo TTL
+        fs.writeFileSync(rutaTtl, rdf);
+
+        // Convertir TTL a RDF/XML usando rdflib
+        const store = $rdf.graph();
+        const contentType = 'text/turtle';
+        const baseUri = 'http://example.org/usuario#';
+
+        $rdf.parse(rdf, store, baseUri, contentType);
+
+        const rdfXml = $rdf.serialize(null, store, baseUri, 'application/rdf+xml');
+
+        // Guardar RDF/XML
+        fs.writeFileSync(rutaXml, rdfXml);
+
+        console.log('Archivos TTL y RDF guardados correctamente.');
+        res.set('Content-Type', 'text/turtle');
+        res.send(rdf);
+    });
+});
+// PUBLICACIONES
+app.get('/rdf/publicaciones', (req, res) => {
+    const consulta = 'SELECT * FROM noticias';
+    db.query(consulta, (err, resultados) => {
+        if (err) {
+            console.error('Error al consultar publicaciones:', err);
+            return res.status(500).send('Error al generar RDF de publicaciones');
+        }
+
+        let rdf = `@prefix : <http://example.org/ontology#> .\n`;
+        rdf += `@prefix pub: <http://example.org/publicacion#> .\n`;
+        rdf += `@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\n`;
+
+        resultados.forEach((publi) => {
+            rdf += `pub:publicacion${publi.idnoticias} a :Publicacion ;\n`;
+            rdf += `    :Titulo "${publi.titulo}" ;\n`;
+            rdf += `    :Contenido "${publi.contenido.replace(/"/g, '\\"')}" ;\n`;
+            rdf += `    :Categoria "${publi.categoria}" ;\n`;
+            rdf += `    :Autor "${publi.autor}" ;\n`;
+            rdf += `    :FechaPublicacion "${publi.fecha_publicacion.toISOString().split('T')[0]}"^^xsd:date ;\n`;
+            rdf += `    :Likes "${publi.LIKES}"^^xsd:int .\n\n`;
+        });
+
+        const rutaTtl = path.join(__dirname, 'ontologia', 'instancias', 'publicaciones.ttl');
+        const rutaXml = path.join(__dirname, 'ontologia', 'instancias', 'publicaciones.rdf');
+        const dir = path.dirname(rutaTtl);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+        fs.writeFileSync(rutaTtl, rdf);
+
+        const store = $rdf.graph();
+        $rdf.parse(rdf, store, 'http://example.org/publicacion#', 'text/turtle');
+        const rdfXml = $rdf.serialize(null, store, 'http://example.org/publicacion#', 'application/rdf+xml');
+        fs.writeFileSync(rutaXml, rdfXml);
+
+        console.log('Publicaciones TTL y RDF guardados correctamente.');
+        res.set('Content-Type', 'text/turtle');
+        res.send(rdf);
+    });
+});
+// COMENTARIOS
+app.get('/rdf/comentarios', (req, res) => {
+    const consulta = 'SELECT * FROM comentarios';
+    db.query(consulta, (err, resultados) => {
+        if (err) {
+            console.error('Error al consultar comentarios:', err);
+            return res.status(500).send('Error al generar RDF de comentarios');
+        }
+
+        let rdf = `@prefix : <http://example.org/ontology#> .\n`;
+        rdf += `@prefix com: <http://example.org/comentario#> .\n`;
+        rdf += `@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\n`;
+
+        resultados.forEach((coment) => {
+            rdf += `com:comentario${coment.idcomentarios} a :Comentario ;\n`;
+            rdf += `    :ContenidoComent "${coment.contenido.replace(/"/g, '\\"')}" ;\n`;
+            rdf += `    :FechaComent "${coment.fechacoment}"^^xsd:date ;\n`;
+            rdf += `    :AutorComent com:usuario${coment.idusuario} ;\n`;
+            rdf += `    :RelacionadoA com:noticia${coment.idnoticias} .\n\n`;
+        });
+
+        const rutaTtl = path.join(__dirname, 'ontologia', 'instancias', 'comentarios.ttl');
+        const rutaXml = path.join(__dirname, 'ontologia', 'instancias', 'comentarios.rdf');
+        const dir = path.dirname(rutaTtl);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+        fs.writeFileSync(rutaTtl, rdf);
+
+        const store = $rdf.graph();
+        $rdf.parse(rdf, store, 'http://example.org/comentario#', 'text/turtle');
+        const rdfXml = $rdf.serialize(null, store, 'http://example.org/comentario#', 'application/rdf+xml');
+        fs.writeFileSync(rutaXml, rdfXml);
+
+        console.log('Comentarios TTL y RDF guardados correctamente.');
+        res.set('Content-Type', 'text/turtle');
+        res.send(rdf);
+    });
+});
+app.get('/rdf/historialnoticias', (req, res) => {
+    const consulta = 'SELECT * FROM historialnoticias';
+    db.query(consulta, (err, resultados) => {
+        if (err) {
+            console.error('Error al consultar historialnoticias:', err);
+            return res.status(500).send('Error al generar RDF de historialnoticias');
+        }
+
+        let rdf = `@prefix : <http://example.org/ontology#> .\n`;
+        rdf += `@prefix hist: <http://example.org/historial#> .\n`;
+        rdf += `@prefix user: <http://example.org/usuario#> .\n`;
+        rdf += `@prefix pub: <http://example.org/publicacion#> .\n`;
+        rdf += `@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\n`;
+
+        resultados.forEach((item) => {
+            rdf += `hist:historialnoticia${item.IDHISTONOTI} a :HistorialNoticia ;\n`;
+            rdf += `    :fechaVista "${item.fecha_vistah}"^^xsd:dateTime ;\n`;
+            rdf += `    :vistoPor user:usuario${item.idusuarioHN} ;\n`;
+            rdf += `    :vistoSobre pub:publicacion${item.idnoticiaHN} .\n\n`;
+        });
+
+        const rutaTtl = path.join(__dirname, 'ontologia', 'instancias', 'historialnoticias.ttl');
+        const rutaXml = path.join(__dirname, 'ontologia', 'instancias', 'historialnoticias.rdf');
+        const dir = path.dirname(rutaTtl);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+        fs.writeFileSync(rutaTtl, rdf);
+
+        const store = $rdf.graph();
+        $rdf.parse(rdf, store, 'http://example.org/historial#', 'text/turtle');
+        const rdfXml = $rdf.serialize(null, store, 'http://example.org/historial#', 'application/rdf+xml');
+        fs.writeFileSync(rutaXml, rdfXml);
+
+        console.log('HistorialNoticias TTL y RDF guardados correctamente.');
+        res.set('Content-Type', 'text/turtle');
+        res.send(rdf);
+    });
+});
+app.get('/rdf/likesnoticias', (req, res) => {
+    const consulta = 'SELECT * FROM likes_noticias';
+    db.query(consulta, (err, resultados) => {
+        if (err) {
+            console.error('Error al consultar likes_noticias:', err);
+            return res.status(500).send('Error al generar RDF de likes_noticias');
+        }
+
+        let rdf = `@prefix : <http://example.org/ontology#> .\n`;
+        rdf += `@prefix like: <http://example.org/like#> .\n`;
+        rdf += `@prefix user: <http://example.org/usuario#> .\n`;
+        rdf += `@prefix pub: <http://example.org/publicacion#> .\n`;
+        rdf += `@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\n`;
+
+        resultados.forEach((item) => {
+            rdf += `like:like${item.IDlikes} a :LikeNoticia ;\n`;
+            rdf += `    :fechaLike "${item.fecha_like}"^^xsd:dateTime ;\n`;
+            rdf += `    :dadoPor user:usuario${item.idusuarioLI} ;\n`;
+            rdf += `    :dadoASobre pub:publicacion${item.idnoticiaLI} .\n\n`;
+        });
+
+        const rutaTtl = path.join(__dirname, 'ontologia', 'instancias', 'likesnoticias.ttl');
+        const rutaXml = path.join(__dirname, 'ontologia', 'instancias', 'likesnoticias.rdf');
+        const dir = path.dirname(rutaTtl);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+        fs.writeFileSync(rutaTtl, rdf);
+
+        const store = $rdf.graph();
+        $rdf.parse(rdf, store, 'http://example.org/like#', 'text/turtle');
+        const rdfXml = $rdf.serialize(null, store, 'http://example.org/like#', 'application/rdf+xml');
+        fs.writeFileSync(rutaXml, rdfXml);
+
+        console.log('LikesNoticias TTL y RDF guardados correctamente.');
+        res.set('Content-Type', 'text/turtle');
+        res.send(rdf);
+    });
+});
+// HISTORIAL DE COMENTARIOS
+app.get('/rdf/historialcomentarios', (req, res) => {
+    const consulta = 'SELECT * FROM historialcomentarios';
+    db.query(consulta, (err, resultados) => {
+        if (err) {
+            console.error('Error al consultar historial:', err);
+            return res.status(500).send('Error al generar RDF de historial de comentarios');
+        }
+
+        let rdf = `@prefix : <http://example.org/ontology#> .\n`;
+        rdf += `@prefix hist: <http://example.org/historial#> .\n`;
+        rdf += `@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\n`;
+
+        resultados.forEach((item) => {
+            rdf += `hist:historial${item.idhistorialHC} a :HistorialComentario ;\n`;
+            rdf += `    :FechaVista "${item.fecha_vista}"^^xsd:dateTime ;\n`;
+            rdf += `    :UsuarioVista hist:usuario${item.idusuarioHC} ;\n`;
+            rdf += `    :NoticiaVista hist:noticia${item.idnoticiaHC} ;\n`;
+            rdf += `    :ComentarioVisto hist:comentario${item.idcomentariosHC} .\n\n`;
+        });
+
+        const rutaTtl = path.join(__dirname, 'ontologia', 'instancias', 'historialcomentarios.ttl');
+        const rutaXml = path.join(__dirname, 'ontologia', 'instancias', 'historialcomentarios.rdf');
+        const dir = path.dirname(rutaTtl);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+        fs.writeFileSync(rutaTtl, rdf);
+
+        const store = $rdf.graph();
+        $rdf.parse(rdf, store, 'http://example.org/historial#', 'text/turtle');
+        const rdfXml = $rdf.serialize(null, store, 'http://example.org/historial#', 'application/rdf+xml');
+        fs.writeFileSync(rutaXml, rdfXml);
+
+        console.log('HistorialComentarios TTL y RDF guardados correctamente.');
+        res.set('Content-Type', 'text/turtle');
+        res.send(rdf);
+    });
+});
+//muy editado jajaj
+app.get('/ontologia/dinamico/:idusuario', (req, res) => {
+    const { idusuario } = req.params;
+    console.log(`Request recibido para RDF de usuario ${idusuario}`);
+
+    const consultaUsuario = 'SELECT * FROM usuario WHERE id = ?';
+    const consultaHistorialNoticias = 'SELECT * FROM historialnoticias WHERE idusuarioHN = ?';
+    const consultaLikesNoticias = 'SELECT * FROM likes_noticias WHERE idusuarioLI = ?';
+    const consultaComentarios = 'SELECT * FROM comentarios WHERE idusuario = ?';
+    //const consultaHistorialComentarios = 'SELECT * FROM historialcomentarios WHERE idusuarioHC = ?';
+
+    db.query(consultaUsuario, [idusuario], (errUsuario, resUsuario) => {
+        if (errUsuario || resUsuario.length === 0) return res.status(500).send('Error al obtener usuario');
+        console.log("Usuario encontrado:", resUsuario);
+        db.query(consultaHistorialNoticias, [idusuario], (errHN, resHN) => {
+            if (errHN) return res.status(500).send('Error al obtener historial noticias');
+            
+            console.log("Historial noticias:", resHN);
+            db.query(consultaLikesNoticias, [idusuario], (errLikes, resLikes) => {
+                if (errLikes) return res.status(500).send('Error al obtener likes noticias');
+                console.log("Likes noticias:", resLikes);
+                db.query(consultaComentarios, [idusuario], (errCom, resCom) => {
+                    if (errCom) return res.status(500).send('Error al obtener comentarios');
+                    console.log("Comentarios:", resCom);
+                    //db.query(consultaHistorialComentarios, [idusuario], (errHC, resHC) => {
+                        //if (errHC) return res.status(500).send('Error al obtener historial comentarios');
+                        //console.log("Historial comentarios:", resHC);
+                        // OK → armar el TTL completo
+                        let rdf = `@prefix : <http://example.org/ontology#> .\n`;
+                        rdf += `@prefix user: <http://example.org/usuario#> .\n`;
+                        rdf += `@prefix pub: <http://example.org/publicacion#> .\n`;
+                        rdf += `@prefix like: <http://example.org/like#> .\n`;
+                        rdf += `@prefix hist: <http://example.org/historial#> .\n`;
+                        rdf += `@prefix com: <http://example.org/comentario#> .\n`;
+                        rdf += `@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\n`;
+
+                        // Usuario
+                        resUsuario.forEach((usuario) => {
+                            rdf += `user:usuario${usuario.id} a :Usuario ;\n`;
+                            rdf += `    :UserName "${usuario.UserName}" ;\n`;
+                            //rdf += `    :Correo "${usuario.Correo}" ;\n`;
+                            //rdf += `    :Contrasena "${usuario.Contrasena}" ;\n`;
+                            rdf += `    :Dia "${usuario.Dia}"^^xsd:int ;\n`;
+                            rdf += `    :Mes "${usuario.Mes}"^^xsd:int ;\n`;
+                            rdf += `    :Anio "${usuario.Anio}"^^xsd:int .\n\n`;
+                        });
+
+                        // Historial noticias
+                        resHN.forEach((item) => {
+                            rdf += `hist:historialnoticia${item.IDHISTONOTI} a :HistorialNoticia ;\n`;
+                            rdf += `    :fechaVista "${item.fecha_vistah}"^^xsd:dateTime ;\n`;
+                            rdf += `    :vistoPor user:usuario${item.idusuarioHN} ;\n`;
+                            rdf += `    :vistoSobre pub:publicacion${item.idnoticiaHN} .\n\n`;
+                        });
+
+                        // Likes noticias
+                        resLikes.forEach((item) => {
+                            rdf += `like:like${item.IDlikes} a :LikeNoticia ;\n`;
+                            rdf += `    :fechaLike "${item.fecha_like}"^^xsd:dateTime ;\n`;
+                            rdf += `    :dadoPor user:usuario${item.idusuarioLI} ;\n`;
+                            rdf += `    :dadoASobre pub:publicacion${item.idnoticiaLI} .\n\n`;
+                        });
+
+                        // Comentarios
+                        resCom.forEach((coment) => {
+                            rdf += `com:comentario${coment.idcomentarios} a :Comentario ;\n`;
+                            rdf += `    :ContenidoComent "${coment.contenido.replace(/"/g, '\\"')}" ;\n`;
+                            rdf += `    :FechaComent "${coment.fechacoment}"^^xsd:date ;\n`;
+                            rdf += `    :AutorComent user:usuario${coment.idusuario} ;\n`;
+                            rdf += `    :RelacionadoA pub:publicacion${coment.idnoticias} .\n\n`;
+                        });
+
+                        // Historial comentarios
+                        /*
+                        resHC.forEach((item) => {
+                            rdf += `hist:historialcomentario${item.idhistorialHC} a :HistorialComentario ;\n`;
+                            rdf += `    :FechaVista "${item.fecha_vista}"^^xsd:dateTime ;\n`;
+                            rdf += `    :UsuarioVista user:usuario${item.idusuarioHC} ;\n`;
+                            rdf += `    :NoticiaVista pub:publicacion${item.idnoticiaHC} ;\n`;
+                            rdf += `    :ComentarioVisto com:comentario${item.idcomentariosHC} .\n\n`;
+                        });*/
+
+                        // Guardar el RDF generado
+                        const dir = path.join(__dirname, 'ontologia', 'each_user');
+                        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+                        const ttlPath = path.join(dir, `usuario_${idusuario}.ttl`);
+                        fs.writeFileSync(ttlPath, rdf);
+
+                        console.log(`Ontología dinámica de usuario ${idusuario} generada.`);
+
+                        res.attachment(`usuario_${idusuario}.ttl`);
+                        res.send(rdf);
+
+                });
+            });
+        });
+    });
+});
 
 
 
